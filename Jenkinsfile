@@ -2,106 +2,154 @@ pipeline {
 
     agent any
 
+    options {
+        timestamps()
+        ansiColor('xterm')
+    }
+
     environment {
 
-        AI_SERVER = "http://192.168.1.20:8000"      // Adresse du serveur IA
-        OPENAPI_FILE = "openapi.yaml"
+        FASTAPI = "http://127.0.0.1:8000"
 
-        POLL_INTERVAL = 10
-        POLL_TIMEOUT = 1800
+        PYTHON = "python"
+
+        PRISM_PORT = "4010"
+
+        TARGET_HOST = ""
+
+        OPENAPI_INPUT = ""
 
     }
 
     stages {
 
         stage('Checkout') {
+
             steps {
+
                 checkout scm
+
             }
+
         }
 
-        stage('Verify OpenAPI') {
+        stage('Install Python Dependencies') {
+
+            steps {
+
+                bat """
+                %PYTHON% -m pip install -r requirements.txt
+                """
+
+            }
+
+        }
+
+        stage('Install Prism') {
+
+            steps {
+
+                bat """
+                npm install -g @stoplight/prism-cli
+                """
+
+            }
+
+        }
+
+        stage('Locate OpenAPI') {
+
             steps {
 
                 script {
 
-                    if (!fileExists(env.OPENAPI_FILE)) {
-                        error "openapi.yaml introuvable"
+                    if (fileExists("openapi.yaml")) {
+
+                        env.OPENAPI_INPUT = "openapi.yaml"
+
                     }
 
-                    echo "Specification OpenAPI trouvée"
+                    else if (fileExists("openapi.yml")) {
+
+                        env.OPENAPI_INPUT = "openapi.yml"
+
+                    }
+
+                    else if (fileExists("swagger.yaml")) {
+
+                        env.OPENAPI_INPUT = "swagger.yaml"
+
+                    }
+
+                    else if (fileExists("swagger.yml")) {
+
+                        env.OPENAPI_INPUT = "swagger.yml"
+
+                    }
+
+                    else if (fileExists("swagger.json")) {
+
+                        env.OPENAPI_INPUT = "swagger.json"
+
+                    }
+
+                    else if (fileExists("openapi.zip")) {
+
+                        env.OPENAPI_INPUT = "openapi.zip"
+
+                    }
+
+                    else if (fileExists("api")) {
+
+                        env.OPENAPI_INPUT = "api"
+
+                    }
+
+                    else {
+
+                        error("Aucune spécification OpenAPI trouvée.")
+
+                    }
+
+                    echo "OpenAPI détecté : ${env.OPENAPI_INPUT}"
 
                 }
 
             }
+
         }
 
-        stage('Generate JMeter Scenario') {
+        stage('Start Prism') {
+
+            when {
+
+                expression {
+
+                    return env.TARGET_HOST.trim() == ""
+
+                }
+
+            }
 
             steps {
 
                 script {
 
-                    bat """
-                    curl -X POST ^
-                    -F file=@%OPENAPI_FILE% ^
-                    %AI_SERVER%/generateScenario ^
-                    -o response.json
-                    """
-
-                    def json = readJSON file: "response.json"
-
-                    env.JOB_ID = json.jobId
-
-                    echo "JOB = ${env.JOB_ID}"
-
-                }
-
-            }
-
-        }
-
-        stage('Wait Execution') {
-
-            steps {
-
-                script {
-
-                    int elapsed = 0
-
-                    while (elapsed < env.POLL_TIMEOUT.toInteger()) {
-
-                        sleep env.POLL_INTERVAL.toInteger()
-
-                        elapsed += env.POLL_INTERVAL.toInteger()
+                    if (env.OPENAPI_INPUT.endsWith(".yaml") ||
+                        env.OPENAPI_INPUT.endsWith(".yml") ||
+                        env.OPENAPI_INPUT.endsWith(".json")) {
 
                         bat """
-                        curl %AI_SERVER%/status/%JOB_ID% -o status.json
+                        start "" prism mock ${env.OPENAPI_INPUT} --host 127.0.0.1 --port ${env.PRISM_PORT}
                         """
 
-                        def status = readJSON file: "status.json"
-
-                        echo "Status : ${status.status}"
-
-                        if(status.status=="COMPLETED"){
-
-                            echo "Execution terminée"
-
-                            break
-
-                        }
-
-                        if(status.status=="FAILED"){
-
-                            error status.error
-
-                        }
+                        bat "timeout /t 8"
 
                     }
 
-                    if(elapsed>=env.POLL_TIMEOUT.toInteger()){
+                    else {
 
-                        error "Timeout"
+                        echo "Prism ignoré (ZIP ou dossier)."
 
                     }
 
@@ -111,41 +159,81 @@ pipeline {
 
         }
 
-        stage('Download Results') {
+        stage('Generate Scenario') {
 
             steps {
 
-                bat """
-                curl %AI_SERVER%/download/%JOB_ID%/jtl -o result.jtl
-                """
+                script {
 
-                bat """
-                curl %AI_SERVER%/download/%JOB_ID%/report -o report.zip
-                """
+                    def curlCmd = """
+                    curl ^
+                    -X POST ^
+                    """
 
-                bat """
-                curl %AI_SERVER%/download/%JOB_ID%/log -o jmeter.log
-                """
+                    if (fileExists(env.OPENAPI_INPUT)) {
 
-                powershell """
-                if(Test-Path report.zip){
-                    Expand-Archive report.zip report -Force
+                        curlCmd += """
+                        -F "file=@${env.OPENAPI_INPUT}" ^
+                        """
+
+                    }
+                    else {
+
+                        curlCmd += """
+                        -F "folder=@${env.OPENAPI_INPUT}" ^
+                        """
+
+                    }
+
+                    if (env.TARGET_HOST.trim() != "") {
+
+                        curlCmd += """
+                        -F "target_host=${env.TARGET_HOST}" ^
+                        """
+
+                    }
+
+                    curlCmd += """
+                    ${env.FASTAPI}/generateScenario
+                    """
+
+                    bat curlCmd
+
                 }
-                """
 
             }
 
         }
 
-        stage('Archive') {
+        stage('Execute JMeter') {
 
             steps {
 
-                archiveArtifacts artifacts: '**/*.jtl', allowEmptyArchive: true
+                echo "Le backend FastAPI exécute automatiquement JMeter."
 
-                archiveArtifacts artifacts: '**/*.log', allowEmptyArchive: true
+            }
 
-                archiveArtifacts artifacts: 'report/**', allowEmptyArchive: true
+        }
+
+        stage('Publish Report') {
+
+            steps {
+
+                publishHTML(target: [
+
+                    allowMissing: true,
+
+                    alwaysLinkToLastBuild: true,
+
+                    keepAll: true,
+
+                    reportDir: 'generated/latest/report',
+
+                    reportFiles: 'index.html',
+
+                    reportName: 'Performance Report'
+
+                ])
 
             }
 
@@ -157,25 +245,24 @@ pipeline {
 
         always {
 
-            echo "================================"
+            bat '''
+            taskkill /F /IM prism.exe >nul 2>nul
+            taskkill /F /IM node.exe >nul 2>nul
+            '''
 
-            echo "JOB ID : ${env.JOB_ID}"
-
-            echo "Pipeline terminé"
-
-            echo "================================"
+            archiveArtifacts artifacts: 'generated/**/*', fingerprint: true
 
         }
 
         success {
 
-            echo "SUCCESS"
+            echo "Pipeline terminé avec succès."
 
         }
 
         failure {
 
-            echo "FAILED"
+            echo "Le pipeline a échoué."
 
         }
 
