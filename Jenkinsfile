@@ -1,16 +1,3 @@
-// =========================================================================
-// Jenkinsfile — Repo "métier" (API à tester)
-// Ce pipeline NE fait QUE :
-//   1. Localiser la spec OpenAPI du repo
-//   2. Appeler la plateforme AI Performance Testing (déjà déployée en continu,
-//      repo séparé — voir README-architecture.md)
-//   3. Attendre la fin du job, publier le rapport, archiver
-//
-// ⚠️ Threads / rampUp / loops / think-time / poids des transactions NE SONT
-// PAS fixés ici : c'est l'Agent 4 (LLM Groq, via ScenarioGenerator) qui les
-// détermine à partir de l'analyse de la spec (voir section 17.1.D du rapport).
-// Imposer ces valeurs depuis Jenkins reviendrait à contourner l'IA.
-// =========================================================================
 
 pipeline {
     agent any
@@ -24,27 +11,22 @@ pipeline {
     }
 
     parameters {
-        // Uniquement des choix d'INFRASTRUCTURE (où taper), jamais de scénario de test.
         string(
             name: 'TARGET_HOST',
             defaultValue: '',
-            description: 'URL cible réelle (laisser vide = auto-résolution par TargetResolver / Prism mock si absente des servers OpenAPI)'
+            description: 'URL cible réelle (laisser vide = auto-résolution par TargetResolver / Prism mock)'
         )
+
         booleanParam(
             name: 'FORCE_MOCK',
             defaultValue: false,
-            description: 'Forcer l\'utilisation du mock Prism même si une baseUrl réelle existe'
+            description: 'Forcer l’utilisation du mock Prism'
         )
     }
 
     environment {
-        // URL fixe de la plateforme IA (autre conteneur Docker, port publié sur l'hôte).
-        // host.docker.internal permet à Jenkins (conteneur) de joindre l'hôte Windows/Mac,
-        // où le port 8000 du conteneur ai-performance-platform est publié.
         AI_SERVER_URL = 'http://host.docker.internal:8000'
         GENERATED_DIR = "${WORKSPACE}/generated"
-        SPEC_FILE     = ""   // renseigné dynamiquement
-        JOB_ID        = ""   // renseigné dynamiquement
     }
 
     triggers {
@@ -53,32 +35,64 @@ pipeline {
 
     stages {
 
-        // ---------------------------------------------------------------
-        stage('Checkout') {
-            steps {
-                echo "🔄 Récupération du dépôt..."
-                checkout scm
-                sh 'git rev-parse HEAD'
-            }
-        }
+        // ============================================================
+       stage('Checkout') {
+    steps {
+        echo "🚨 JENKINSFILE VERSION TEST : 2026-08-09-V2"
 
-        // ---------------------------------------------------------------
+        echo "🔄 Récupération du dépôt..."
+
+        checkout scm
+
+        sh '''
+            echo "======================================"
+            echo "GIT REMOTE"
+            echo "======================================"
+            git remote -v
+
+            echo "======================================"
+            echo "GIT BRANCH"
+            echo "======================================"
+            git branch --show-current
+
+            echo "======================================"
+            echo "GIT COMMIT"
+            echo "======================================"
+            git rev-parse HEAD
+
+            echo "======================================"
+            echo "FILES"
+            echo "======================================"
+            ls -lah
+        '''
+    }
+}
+        // ============================================================
         stage('Locate OpenAPI Spec') {
             steps {
-                echo "🔍 Localisation de la spécification OpenAPI..."
                 script {
+
+                    echo "🔍 Recherche de la spécification OpenAPI..."
+
                     def candidates = [
-                        'openapi.yaml', 'openapi.yml', 'openapi.json',
-                        'swagger.yaml', 'swagger.yml', 'swagger.json',
-                        'api-spec.yaml', 'api-spec.json',
-                        'petstore.json', 'petstore.yaml', 'petstore.yml',
-                        'petstrore.json', 'petstrore.yaml', 'petstrore.yml'  // nom exact utilisé dans le repo
+                        'openapi.yaml',
+                        'openapi.yml',
+                        'openapi.json',
+                        'swagger.yaml',
+                        'swagger.yml',
+                        'swagger.json',
+                        'api-spec.yaml',
+                        'api-spec.json',
+                        'petstore.json',
+                        'petstore.yaml',
+                        'petstore.yml',
+                        'petstrore.json',
+                        'petstrore.yaml',
+                        'petstrore.yml'
                     ]
 
-                    // Boucle explicite (pas de .find{} avec un step à l'intérieur —
-                    // piège CPS connu qui peut échouer silencieusement dans certaines
-                    // versions du plugin Pipeline Groovy).
                     def found = null
+
                     for (candidate in candidates) {
                         if (fileExists(candidate)) {
                             found = candidate
@@ -88,134 +102,253 @@ pipeline {
 
                     if (!found) {
                         def result = sh(
-                            script: "find . -maxdepth 3 -iregex '.*\\(openapi\\|swagger\\|petstore\\|petstrore\\|api-spec\\).*\\.\\(ya?ml\\|json\\)' | head -n 1",
+                            script: """
+                                find . -maxdepth 3 -type f \
+                                \\( -iname '*openapi*' \
+                                -o -iname '*swagger*' \
+                                -o -iname '*petstore*' \
+                                -o -iname '*petstrore*' \
+                                -o -iname '*api-spec*' \\) \
+                                \\( -iname '*.yaml' \
+                                -o -iname '*.yml' \
+                                -o -iname '*.json' \\) \
+                                | head -n 1
+                            """,
                             returnStdout: true
                         ).trim()
-                        found = result ?: null
+
+                        if (result) {
+                            found = result
+                        }
                     }
 
                     if (!found) {
-                        error("❌ Aucune spécification OpenAPI/Swagger trouvée dans le dépôt.")
+                        error("❌ Aucune spécification OpenAPI/Swagger trouvée.")
                     }
 
+                    echo "✅ Spec trouvée : ${found}"
+
+                    /*
+                     * IMPORTANT :
+                     * On stocke la valeur dans une variable d'environnement
+                     * Jenkins pour les stages suivants.
+                     */
                     env.SPEC_FILE = found
-                    echo "✅ Spécification trouvée : ${env.SPEC_FILE}"
+
+                    echo "🔎 Vérification env.SPEC_FILE = [${env.SPEC_FILE}]"
+
+                    sh """
+                        echo "📄 SPEC_FILE depuis shell = [${env.SPEC_FILE}]"
+                        test -f "${env.SPEC_FILE}"
+                    """
                 }
             }
         }
 
-        // ---------------------------------------------------------------
+        // ============================================================
         stage('Check AI Platform Availability') {
             steps {
-                echo "🔎 Vérification que la plateforme IA (service partagé) est disponible..."
+
+                echo "🔎 Vérification de la plateforme IA..."
+
                 sh '''
                     set -e
-                    if ! curl -sf "${AI_SERVER_URL}/health" > /dev/null; then
-                        echo "❌ Plateforme AI Performance Testing injoignable sur ${AI_SERVER_URL}"
-                        echo "   -> Vérifiez qu'elle est bien déployée en continu (voir repo dédié)."
-                        exit 1
-                    fi
+
+                    echo "AI_SERVER_URL=${AI_SERVER_URL}"
+
+                    curl -sf "${AI_SERVER_URL}/health" > /dev/null
+
                     echo "✅ Plateforme IA disponible."
                 '''
             }
         }
 
-        // ---------------------------------------------------------------
+        // ============================================================
         stage('Generate & Run Scenario (LLM decides everything)') {
             steps {
-                echo "🤖 Envoi de la spec — le LLM détermine seul threads/rampUp/loops/poids/assertions..."
+
+                echo "🤖 Envoi de la spec au moteur IA..."
+
                 script {
-                    echo "🔎 Contrôle — env.SPEC_FILE au moment de l'appel = [${env.SPEC_FILE}]"
-                    if (!env.SPEC_FILE || env.SPEC_FILE == 'null' || env.SPEC_FILE.trim() == '') {
-                        error("❌ SPEC_FILE est vide/null à ce stade — le stage Locate OpenAPI Spec n'a pas correctement peuplé la variable. Relancez un build complet (pas Restart from Stage).")
+
+                    /*
+                     * IMPORTANT :
+                     * On récupère la valeur depuis env au début du stage.
+                     */
+                    def spec = env.SPEC_FILE
+
+                    echo "🔎 SPEC_FILE reçu = [${spec}]"
+
+                    if (!spec ||
+                        spec == 'null' ||
+                        spec.trim() == '') {
+
+                        error("""
+                        ❌ SPEC_FILE est vide/null.
+
+                        Le stage Locate OpenAPI Spec n'a pas correctement
+                        transmis la variable au stage actuel.
+                        """)
                     }
 
-                    def targetHostArg = params.TARGET_HOST?.trim() ?
-                        "-F target_host=${params.TARGET_HOST.trim()}" : ""
-                    def forceMockArg = params.FORCE_MOCK ? "-F use_mock=true" : ""
+                    if (!fileExists(spec)) {
+                        error("❌ Le fichier OpenAPI n'existe pas : ${spec}")
+                    }
 
-                    // Aucun -F threads=... / rampUp=... / loops=... :
-                    // on laisse volontairement l'Agent 4 (Groq) décider.
+                    echo "📄 Fichier envoyé : ${spec}"
+
+                    def curlCommand = """
+                        curl -sS -X POST "${AI_SERVER_URL}/generateScenario" \
+                            -F "file=@${spec}"
+                    """
+
+                    if (params.TARGET_HOST?.trim()) {
+                        curlCommand += """
+                            -F "target_host=${params.TARGET_HOST.trim()}"
+                        """
+                    }
+
+                    if (params.FORCE_MOCK) {
+                        curlCommand += """
+                            -F "use_mock=true"
+                        """
+                    }
+
                     def response = sh(
+                        script: curlCommand,
+                        returnStdout: true
+                    ).trim()
+
+                    echo "📨 Réponse plateforme IA : ${response}"
+
+                    def generatedJobId = sh(
                         script: """
-                            curl -s -X POST "${AI_SERVER_URL}/generateScenario" \
-                                -F "file=@${env.SPEC_FILE}" \
-                                ${targetHostArg} \
-                                ${forceMockArg}
+                            printf '%s' '${response.replace("'", "'\\\\''")}' |
+                            python3 -c '
+import sys
+import json
+
+data = json.load(sys.stdin)
+
+print(data.get("jobId", ""))
+'
                         """,
                         returnStdout: true
                     ).trim()
 
-                    echo "Réponse brute : ${response}"
+                    if (!generatedJobId) {
+                        error("""
+                        ❌ Aucun jobId retourné par la plateforme IA.
 
-                    def jobId = sh(
-                        script: "echo '${response}' | python3 -c \"import sys, json; print(json.load(sys.stdin).get('jobId', ''))\"",
-                        returnStdout: true
-                    ).trim()
-
-                    if (!jobId) {
-                        error("❌ Échec de la génération du scénario (jobId introuvable). Réponse: ${response}")
+                        Réponse :
+                        ${response}
+                        """)
                     }
 
-                    env.JOB_ID = jobId
-                    echo "✅ Job créé : ${env.JOB_ID} — configuration décidée par l'IA, à consulter dans le rapport."
+                    env.JOB_ID = generatedJobId
+
+                    echo "✅ Job créé : ${env.JOB_ID}"
                 }
             }
         }
 
-        // ---------------------------------------------------------------
+        // ============================================================
         stage('Wait for Completion') {
             steps {
-                echo "⏳ Attente de la fin du job ${env.JOB_ID}..."
+
                 script {
+
+                    def currentJobId = env.JOB_ID
+
+                    if (!currentJobId) {
+                        error("❌ JOB_ID est vide.")
+                    }
+
+                    echo "⏳ Attente du job : ${currentJobId}"
+
                     def status = 'QUEUED'
-                    def maxAttempts = 300 // ~25 min à 5s d'intervalle
+                    def maxAttempts = 300
                     def attempt = 0
 
-                    while (status in ['QUEUED', 'RUNNING'] && attempt < maxAttempts) {
-                        sleep(time: 5, unit: 'SECONDS')
+                    while (
+                        status in ['QUEUED', 'RUNNING'] &&
+                        attempt < maxAttempts
+                    ) {
+
+                        sleep(
+                            time: 5,
+                            unit: 'SECONDS'
+                        )
+
                         status = sh(
                             script: """
-                                curl -s "${AI_SERVER_URL}/status/${env.JOB_ID}" \
-                                    | python3 -c "import sys, json; print(json.load(sys.stdin).get('status', 'UNKNOWN'))"
+                                curl -sS \
+                                "${AI_SERVER_URL}/status/${currentJobId}" |
+                                python3 -c '
+import sys
+import json
+
+data = json.load(sys.stdin)
+print(data.get("status", "UNKNOWN"))
+'
                             """,
                             returnStdout: true
                         ).trim()
+
                         attempt++
+
                         echo "   Statut (${attempt}) : ${status}"
                     }
 
                     if (status != 'COMPLETED') {
-                        error("❌ Le job ${env.JOB_ID} s'est terminé avec le statut : ${status}")
+                        error(
+                            "❌ Job ${currentJobId} terminé avec statut : ${status}"
+                        )
                     }
-                    echo "✅ Test de charge terminé avec succès."
+
+                    echo "✅ Test terminé."
                 }
             }
         }
 
-        // ---------------------------------------------------------------
+        // ============================================================
         stage('Download Results') {
             steps {
-                echo "📥 Téléchargement des résultats (JTL, rapport, logs)..."
+
                 sh '''
                     set -e
+
                     mkdir -p "${GENERATED_DIR}/${JOB_ID}"
+
                     cd "${GENERATED_DIR}/${JOB_ID}"
 
-                    curl -s -o report.zip   "${AI_SERVER_URL}/download/${JOB_ID}/report"
-                    curl -s -o results.jtl  "${AI_SERVER_URL}/download/${JOB_ID}/jtl"
-                    curl -s -o jmeter.log   "${AI_SERVER_URL}/download/${JOB_ID}/log"
-                    curl -s -o stdout.log   "${AI_SERVER_URL}/download/${JOB_ID}/stdout"
+                    echo "📥 Téléchargement du rapport..."
+
+                    curl -fS -o report.zip \
+                        "${AI_SERVER_URL}/download/${JOB_ID}/report"
+
+                    curl -fS -o results.jtl \
+                        "${AI_SERVER_URL}/download/${JOB_ID}/jtl"
+
+                    curl -fS -o jmeter.log \
+                        "${AI_SERVER_URL}/download/${JOB_ID}/log"
+
+                    curl -fS -o stdout.log \
+                        "${AI_SERVER_URL}/download/${JOB_ID}/stdout"
+
+                    mkdir -p report
 
                     unzip -o report.zip -d report/
+
+                    echo "✅ Résultats téléchargés."
                 '''
             }
         }
 
-        // ---------------------------------------------------------------
+        // ============================================================
         stage('Publish HTML Report') {
             steps {
-                echo "📊 Publication du rapport HTML JMeter..."
+
                 publishHTML(target: [
                     allowMissing: false,
                     alwaysLinkToLastBuild: true,
@@ -228,22 +361,30 @@ pipeline {
         }
     }
 
-    // -------------------------------------------------------------------
+    // ================================================================
     post {
+
         always {
-            echo "📦 Archivage des artefacts (incl. la configuration décidée par l'IA)..."
-            archiveArtifacts artifacts: 'generated/**', allowEmptyArchive: true, fingerprint: true
+
+            echo "📦 Archivage des artefacts..."
+
+            archiveArtifacts(
+                artifacts: 'generated/**',
+                allowEmptyArchive: true,
+                fingerprint: true
+            )
         }
+
         success {
             echo "✅ Pipeline terminé avec succès — Job ${env.JOB_ID}"
-            // slackSend(color: 'good', message: "✅ Test de charge réussi — Job ${env.JOB_ID} (build ${env.BUILD_URL})")
         }
+
         failure {
             echo "❌ Le pipeline a échoué."
-            // slackSend(color: 'danger', message: "❌ Échec du test de charge (build ${env.BUILD_URL})")
         }
+
         unstable {
-            echo "⚠️ Pipeline instable — vérifier les seuils de performance (taux d'erreur, latences)."
+            echo "⚠️ Pipeline instable."
         }
     }
 }
