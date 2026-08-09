@@ -74,7 +74,17 @@ pipeline {
                         'petstore.json', 'petstore.yaml', 'petstore.yml',
                         'petstrore.json', 'petstrore.yaml', 'petstrore.yml'  // nom exact utilisé dans le repo
                     ]
-                    def found = candidates.find { fileExists(it) }
+
+                    // Boucle explicite (pas de .find{} avec un step à l'intérieur —
+                    // piège CPS connu qui peut échouer silencieusement dans certaines
+                    // versions du plugin Pipeline Groovy).
+                    def found = null
+                    for (candidate in candidates) {
+                        if (fileExists(candidate)) {
+                            found = candidate
+                            break
+                        }
+                    }
 
                     if (!found) {
                         def result = sh(
@@ -115,6 +125,11 @@ pipeline {
             steps {
                 echo "🤖 Envoi de la spec — le LLM détermine seul threads/rampUp/loops/poids/assertions..."
                 script {
+                    echo "🔎 Contrôle — env.SPEC_FILE au moment de l'appel = [${env.SPEC_FILE}]"
+                    if (!env.SPEC_FILE || env.SPEC_FILE == 'null' || env.SPEC_FILE.trim() == '') {
+                        error("❌ SPEC_FILE est vide/null à ce stade — le stage Locate OpenAPI Spec n'a pas correctement peuplé la variable. Relancez un build complet (pas Restart from Stage).")
+                    }
+
                     def targetHostArg = params.TARGET_HOST?.trim() ?
                         "-F target_host=${params.TARGET_HOST.trim()}" : ""
                     def forceMockArg = params.FORCE_MOCK ? "-F use_mock=true" : ""
