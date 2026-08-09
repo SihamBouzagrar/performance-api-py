@@ -1,271 +1,233 @@
-pipeline {
+// =========================================================================
+// Jenkinsfile — Repo "métier" (API à tester)
+// Ce pipeline NE fait QUE :
+//   1. Localiser la spec OpenAPI du repo
+//   2. Appeler la plateforme AI Performance Testing (déjà déployée en continu,
+//      repo séparé — voir README-architecture.md)
+//   3. Attendre la fin du job, publier le rapport, archiver
+//
+// ⚠️ Threads / rampUp / loops / think-time / poids des transactions NE SONT
+// PAS fixés ici : c'est l'Agent 4 (LLM Groq, via ScenarioGenerator) qui les
+// détermine à partir de l'analyse de la spec (voir section 17.1.D du rapport).
+// Imposer ces valeurs depuis Jenkins reviendrait à contourner l'IA.
+// =========================================================================
 
+pipeline {
     agent any
 
     options {
-        timestamps()
+        disableConcurrentBuilds()
+        timeout(time: 45, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '15'))
         ansiColor('xterm')
+        timestamps()
+    }
+
+    parameters {
+        // Uniquement des choix d'INFRASTRUCTURE (où taper), jamais de scénario de test.
+        string(
+            name: 'TARGET_HOST',
+            defaultValue: '',
+            description: 'URL cible réelle (laisser vide = auto-résolution par TargetResolver / Prism mock si absente des servers OpenAPI)'
+        )
+        booleanParam(
+            name: 'FORCE_MOCK',
+            defaultValue: false,
+            description: 'Forcer l\'utilisation du mock Prism même si une baseUrl réelle existe'
+        )
+        string(
+            name: 'AI_SERVER_URL',
+            defaultValue: 'http://ai-perf-platform:8000',
+            description: 'URL du service AI Performance Testing (déployé en continu, repo séparé)'
+        )
     }
 
     environment {
+        GENERATED_DIR = "${WORKSPACE}/generated"
+        SPEC_FILE     = ""   // renseigné dynamiquement
+        JOB_ID        = ""   // renseigné dynamiquement
+    }
 
-        FASTAPI = "http://127.0.0.1:8000"
-
-        PYTHON = "python"
-
-        PRISM_PORT = "4010"
-
-        TARGET_HOST = ""
-
-        OPENAPI_INPUT = ""
-
+    triggers {
+        githubPush()
     }
 
     stages {
 
+        // ---------------------------------------------------------------
         stage('Checkout') {
-
             steps {
-
+                echo "🔄 Récupération du dépôt..."
                 checkout scm
-
+                sh 'git rev-parse HEAD'
             }
-
         }
 
-        stage('Install Python Dependencies') {
-
+        // ---------------------------------------------------------------
+        stage('Locate OpenAPI Spec') {
             steps {
-
-                bat """
-                %PYTHON% -m pip install -r requirements.txt
-                """
-
-            }
-
-        }
-
-        stage('Install Prism') {
-
-            steps {
-
-                bat """
-                npm install -g @stoplight/prism-cli
-                """
-
-            }
-
-        }
-
-        stage('Locate OpenAPI') {
-
-            steps {
-
+                echo "🔍 Localisation de la spécification OpenAPI..."
                 script {
+                    def candidates = [
+                        'openapi.yaml', 'openapi.yml', 'openapi.json',
+                        'swagger.yaml', 'swagger.yml', 'swagger.json',
+                        'api-spec.yaml', 'api-spec.json'
+                    ]
+                    def found = candidates.find { fileExists(it) }
 
-                    if (fileExists("openapi.yaml")) {
-
-                        env.OPENAPI_INPUT = "openapi.yaml"
-
+                    if (!found) {
+                        def result = sh(
+                            script: "find . -maxdepth 3 -iregex '.*\\(openapi\\|swagger\\).*\\.\\(ya?ml\\|json\\)' | head -n 1",
+                            returnStdout: true
+                        ).trim()
+                        found = result ?: null
                     }
 
-                    else if (fileExists("openapi.yml")) {
-
-                        env.OPENAPI_INPUT = "openapi.yml"
-
+                    if (!found) {
+                        error("❌ Aucune spécification OpenAPI/Swagger trouvée dans le dépôt.")
                     }
 
-                    else if (fileExists("swagger.yaml")) {
-
-                        env.OPENAPI_INPUT = "swagger.yaml"
-
-                    }
-
-                    else if (fileExists("swagger.yml")) {
-
-                        env.OPENAPI_INPUT = "swagger.yml"
-
-                    }
-
-                    else if (fileExists("swagger.json")) {
-
-                        env.OPENAPI_INPUT = "swagger.json"
-
-                    }
-
-                    else if (fileExists("openapi.zip")) {
-
-                        env.OPENAPI_INPUT = "openapi.zip"
-
-                    }
-
-                    else if (fileExists("api")) {
-
-                        env.OPENAPI_INPUT = "api"
-
-                    }
-
-                    else {
-
-                        error("Aucune spécification OpenAPI trouvée.")
-
-                    }
-
-                    echo "OpenAPI détecté : ${env.OPENAPI_INPUT}"
-
+                    env.SPEC_FILE = found
+                    echo "✅ Spécification trouvée : ${env.SPEC_FILE}"
                 }
-
             }
-
         }
 
-        stage('Start Prism') {
-
-            when {
-
-                expression {
-
-                    return env.TARGET_HOST.trim() == ""
-
-                }
-
-            }
-
+        // ---------------------------------------------------------------
+        stage('Check AI Platform Availability') {
             steps {
+                echo "🔎 Vérification que la plateforme IA (service partagé) est disponible..."
+                sh '''
+                    set -e
+                    if ! curl -sf "${AI_SERVER_URL}/health" > /dev/null; then
+                        echo "❌ Plateforme AI Performance Testing injoignable sur ${AI_SERVER_URL}"
+                        echo "   -> Vérifiez qu'elle est bien déployée en continu (voir repo dédié)."
+                        exit 1
+                    fi
+                    echo "✅ Plateforme IA disponible."
+                '''
+            }
+        }
 
+        // ---------------------------------------------------------------
+        stage('Generate & Run Scenario (LLM decides everything)') {
+            steps {
+                echo "🤖 Envoi de la spec — le LLM détermine seul threads/rampUp/loops/poids/assertions..."
                 script {
+                    def targetHostArg = params.TARGET_HOST?.trim() ?
+                        "-F target_host=${params.TARGET_HOST.trim()}" : ""
+                    def forceMockArg = params.FORCE_MOCK ? "-F use_mock=true" : ""
 
-                    if (env.OPENAPI_INPUT.endsWith(".yaml") ||
-                        env.OPENAPI_INPUT.endsWith(".yml") ||
-                        env.OPENAPI_INPUT.endsWith(".json")) {
+                    // Aucun -F threads=... / rampUp=... / loops=... :
+                    // on laisse volontairement l'Agent 4 (Groq) décider.
+                    def response = sh(
+                        script: """
+                            curl -s -X POST "${AI_SERVER_URL}/generateScenario" \
+                                -F "file=@${env.SPEC_FILE}" \
+                                ${targetHostArg} \
+                                ${forceMockArg}
+                        """,
+                        returnStdout: true
+                    ).trim()
 
-                        bat """
-                        start "" prism mock ${env.OPENAPI_INPUT} --host 127.0.0.1 --port ${env.PRISM_PORT}
-                        """
+                    echo "Réponse brute : ${response}"
 
-                        bat "timeout /t 8"
+                    def jobId = sh(
+                        script: "echo '${response}' | python3 -c \"import sys, json; print(json.load(sys.stdin).get('jobId', ''))\"",
+                        returnStdout: true
+                    ).trim()
 
+                    if (!jobId) {
+                        error("❌ Échec de la génération du scénario (jobId introuvable). Réponse: ${response}")
                     }
 
-                    else {
-
-                        echo "Prism ignoré (ZIP ou dossier)."
-
-                    }
-
+                    env.JOB_ID = jobId
+                    echo "✅ Job créé : ${env.JOB_ID} — configuration décidée par l'IA, à consulter dans le rapport."
                 }
-
             }
-
         }
 
-        stage('Generate Scenario') {
-
+        // ---------------------------------------------------------------
+        stage('Wait for Completion') {
             steps {
-
+                echo "⏳ Attente de la fin du job ${env.JOB_ID}..."
                 script {
+                    def status = 'QUEUED'
+                    def maxAttempts = 300 // ~25 min à 5s d'intervalle
+                    def attempt = 0
 
-                    def curlCmd = """
-                    curl ^
-                    -X POST ^
-                    """
-
-                    if (fileExists(env.OPENAPI_INPUT)) {
-
-                        curlCmd += """
-                        -F "file=@${env.OPENAPI_INPUT}" ^
-                        """
-
-                    }
-                    else {
-
-                        curlCmd += """
-                        -F "folder=@${env.OPENAPI_INPUT}" ^
-                        """
-
+                    while (status in ['QUEUED', 'RUNNING'] && attempt < maxAttempts) {
+                        sleep(time: 5, unit: 'SECONDS')
+                        status = sh(
+                            script: """
+                                curl -s "${AI_SERVER_URL}/status/${env.JOB_ID}" \
+                                    | python3 -c "import sys, json; print(json.load(sys.stdin).get('status', 'UNKNOWN'))"
+                            """,
+                            returnStdout: true
+                        ).trim()
+                        attempt++
+                        echo "   Statut (${attempt}) : ${status}"
                     }
 
-                    if (env.TARGET_HOST.trim() != "") {
-
-                        curlCmd += """
-                        -F "target_host=${env.TARGET_HOST}" ^
-                        """
-
+                    if (status != 'COMPLETED') {
+                        error("❌ Le job ${env.JOB_ID} s'est terminé avec le statut : ${status}")
                     }
-
-                    curlCmd += """
-                    ${env.FASTAPI}/generateScenario
-                    """
-
-                    bat curlCmd
-
+                    echo "✅ Test de charge terminé avec succès."
                 }
-
             }
-
         }
 
-        stage('Execute JMeter') {
-
+        // ---------------------------------------------------------------
+        stage('Download Results') {
             steps {
+                echo "📥 Téléchargement des résultats (JTL, rapport, logs)..."
+                sh '''
+                    set -e
+                    mkdir -p "${GENERATED_DIR}/${JOB_ID}"
+                    cd "${GENERATED_DIR}/${JOB_ID}"
 
-                echo "Le backend FastAPI exécute automatiquement JMeter."
+                    curl -s -o report.zip   "${AI_SERVER_URL}/download/${JOB_ID}/report"
+                    curl -s -o results.jtl  "${AI_SERVER_URL}/download/${JOB_ID}/jtl"
+                    curl -s -o jmeter.log   "${AI_SERVER_URL}/download/${JOB_ID}/log"
+                    curl -s -o stdout.log   "${AI_SERVER_URL}/download/${JOB_ID}/stdout"
 
+                    unzip -o report.zip -d report/
+                '''
             }
-
         }
 
-        stage('Publish Report') {
-
+        // ---------------------------------------------------------------
+        stage('Publish HTML Report') {
             steps {
-
+                echo "📊 Publication du rapport HTML JMeter..."
                 publishHTML(target: [
-
-                    allowMissing: true,
-
+                    allowMissing: false,
                     alwaysLinkToLastBuild: true,
-
                     keepAll: true,
-
-                    reportDir: 'generated/latest/report',
-
+                    reportDir: "generated/${env.JOB_ID}/report",
                     reportFiles: 'index.html',
-
-                    reportName: 'Performance Report'
-
+                    reportName: 'JMeter Performance Report'
                 ])
-
             }
-
         }
-
     }
 
+    // -------------------------------------------------------------------
     post {
-
         always {
-
-            bat '''
-            taskkill /F /IM prism.exe >nul 2>nul
-            taskkill /F /IM node.exe >nul 2>nul
-            '''
-
-            archiveArtifacts artifacts: 'generated/**/*', fingerprint: true
-
+            echo "📦 Archivage des artefacts (incl. la configuration décidée par l'IA)..."
+            archiveArtifacts artifacts: 'generated/**', allowEmptyArchive: true, fingerprint: true
         }
-
         success {
-
-            echo "Pipeline terminé avec succès."
-
+            echo "✅ Pipeline terminé avec succès — Job ${env.JOB_ID}"
+            // slackSend(color: 'good', message: "✅ Test de charge réussi — Job ${env.JOB_ID} (build ${env.BUILD_URL})")
         }
-
         failure {
-
-            echo "Le pipeline a échoué."
-
+            echo "❌ Le pipeline a échoué."
+            // slackSend(color: 'danger', message: "❌ Échec du test de charge (build ${env.BUILD_URL})")
         }
-
+        unstable {
+            echo "⚠️ Pipeline instable — vérifier les seuils de performance (taux d'erreur, latences)."
+        }
     }
-
 }
