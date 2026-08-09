@@ -35,14 +35,13 @@ pipeline {
             defaultValue: false,
             description: 'Forcer l\'utilisation du mock Prism même si une baseUrl réelle existe'
         )
-        string(
-            name: 'AI_SERVER_URL',
-            defaultValue: 'http://ai-perf-platform:8000',
-            description: 'URL du service AI Performance Testing (déployé en continu, repo séparé)'
-        )
     }
 
     environment {
+        // URL fixe de la plateforme IA (autre conteneur Docker, port publié sur l'hôte).
+        // host.docker.internal permet à Jenkins (conteneur) de joindre l'hôte Windows/Mac,
+        // où le port 8000 du conteneur ai-performance-platform est publié.
+        AI_SERVER_URL = 'http://host.docker.internal:8000'
         GENERATED_DIR = "${WORKSPACE}/generated"
         SPEC_FILE     = ""   // renseigné dynamiquement
         JOB_ID        = ""   // renseigné dynamiquement
@@ -60,14 +59,6 @@ pipeline {
                 echo "🔄 Récupération du dépôt..."
                 checkout scm
                 sh 'git rev-parse HEAD'
-            }
-        }
-
-        // ---------------------------------------------------------------
-        stage('Debug — Lister les fichiers extraits') {
-            steps {
-                echo "📂 Contenu du workspace après checkout GitHub :"
-                sh 'ls -la'
             }
         }
 
