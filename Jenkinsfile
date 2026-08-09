@@ -64,6 +64,14 @@ pipeline {
         }
 
         // ---------------------------------------------------------------
+        stage('Debug — Lister les fichiers extraits') {
+            steps {
+                echo "📂 Contenu du workspace après checkout GitHub :"
+                sh 'ls -la'
+            }
+        }
+
+        // ---------------------------------------------------------------
         stage('Locate OpenAPI Spec') {
             steps {
                 echo "🔍 Localisation de la spécification OpenAPI..."
@@ -71,13 +79,15 @@ pipeline {
                     def candidates = [
                         'openapi.yaml', 'openapi.yml', 'openapi.json',
                         'swagger.yaml', 'swagger.yml', 'swagger.json',
-                        'api-spec.yaml', 'api-spec.json'
+                        'api-spec.yaml', 'api-spec.json',
+                        'petstore.json', 'petstore.yaml', 'petstore.yml',
+                        'petstrore.json', 'petstrore.yaml', 'petstrore.yml'  // nom exact utilisé dans le repo
                     ]
                     def found = candidates.find { fileExists(it) }
 
                     if (!found) {
                         def result = sh(
-                            script: "find . -maxdepth 3 -iregex '.*\\(openapi\\|swagger\\).*\\.\\(ya?ml\\|json\\)' | head -n 1",
+                            script: "find . -maxdepth 3 -iregex '.*\\(openapi\\|swagger\\|petstore\\|petstrore\\|api-spec\\).*\\.\\(ya?ml\\|json\\)' | head -n 1",
                             returnStdout: true
                         ).trim()
                         found = result ?: null
