@@ -282,6 +282,12 @@ pipeline {
                     curl -fS -o stdout.log  "${AI_SERVER_URL}/download/${JOB_ID}/stdout"
                     echo "stdout.log téléchargé."
 
+                    # Scénario JMX généré par le LLM (threads, rampUp, loops, endpoints, assertions)
+                    curl -fS -o scenario.jmx "${AI_SERVER_URL}/download/${JOB_ID}/jmx" || echo "⚠️ scenario.jmx non disponible (endpoint /jmx pas encore déployé côté plateforme IA ?)"
+                    if [ -f scenario.jmx ]; then
+                        echo "scenario.jmx téléchargé."
+                    fi
+
                     mkdir -p report
                     unzip -o report.zip -d report/
 
