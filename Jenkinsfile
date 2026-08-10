@@ -173,23 +173,31 @@ pipeline {
                     def targetHostArg = params.TARGET_HOST?.trim() ? "-F target_host=${params.TARGET_HOST.trim()}" : ""
                     def forceMockArg  = params.FORCE_MOCK ? "-F use_mock=true" : ""
 
-                    // Écriture de la réponse dans un fichier plutôt que capture
-                    // directe en variable Groovy : évite tout problème de
-                    // quoting shell/JSON sur des réponses volumineuses.
-                    sh """
-                        set -e
-                        curl -fS -X POST "${AI_SERVER_URL}/generateScenario" \\
-                            -F "file=@${spec}" \\
-                            ${targetHostArg} \\
-                            ${forceMockArg} \\
-                            -o "${WORKSPACE}/generate_response.json"
-                    """
+                    // -f est retiré : on veut voir le corps de la réponse
+                    // même en cas d'erreur HTTP (ex: 400 avec détail Pydantic).
+                    // Le code HTTP est capturé séparément via -w.
+                    def httpCode = sh(
+                        script: """
+                            curl -s -X POST "${AI_SERVER_URL}/generateScenario" \\
+                                -F "file=@${spec}" \\
+                                ${targetHostArg} \\
+                                ${forceMockArg} \\
+                                -o "${WORKSPACE}/generate_response.json" \\
+                                -w "%{http_code}"
+                        """,
+                        returnStdout: true
+                    ).trim()
 
                     def response = readFile("${WORKSPACE}/generate_response.json")
                     echo "=================================================="
+                    echo "CODE HTTP : ${httpCode}"
                     echo "RÉPONSE PLATEFORME IA"
                     echo "=================================================="
                     echo response
+
+                    if (httpCode != '200') {
+                        error("La plateforme IA a renvoyé le code HTTP ${httpCode}. Détail : ${response}")
+                    }
 
                     def generatedJobId = sh(
                         script: """
