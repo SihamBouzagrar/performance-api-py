@@ -285,6 +285,14 @@ pipeline {
                     mkdir -p report
                     unzip -o report.zip -d report/
 
+                    # Le zip contient déjà un dossier "report/" à sa racine,
+                    # ce qui crée report/report/index.html. On aplatit :
+                    # si report/report/ existe, on remonte son contenu d'un niveau.
+                    if [ -d "report/report" ]; then
+                        mv report/report/* report/ 2>/dev/null || true
+                        rmdir report/report 2>/dev/null || true
+                    fi
+
                     echo "--- FICHIERS GÉNÉRÉS ---"
                     find . -maxdepth 3 -type f -print
 
